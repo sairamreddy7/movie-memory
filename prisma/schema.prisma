@@ -1,0 +1,91 @@
+// Prisma Schema for Movie Memory (Base Implementation + Variant A)
+// Docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// NextAuth standard OAuth Account model
+// Note: linkAccount in src/lib/auth.ts strips unused OAuth tokens (access_token,
+// refresh_token, id_token) before persistence so bearer tokens are not stored at rest.
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+}
+
+// NextAuth standard Session model
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime @db.Timestamptz(3)
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// Application User model
+// Stores Google profile info, favoriteMovie (set during onboarding),
+// and a DB-level generation lease lock (factGeneratingAt + factLockId) for Variant A burst protection.
+// Uses @db.Timestamptz(3) so comparisons against Postgres NOW() are timezone-safe.
+model User {
+  id               String      @id @default(cuid())
+  name             String?
+  email            String?     @unique
+  emailVerified    DateTime?   @db.Timestamptz(3)
+  image            String?
+  favoriteMovie    String?     @db.VarChar(120)
+  factGeneratingAt DateTime?   @db.Timestamptz(3) // Variant A: DB-level lease acquisition timestamp (via Postgres NOW())
+  factLockId       String?     @db.VarChar(64)    // Variant A: Owner token for compare-and-clear release
+  createdAt        DateTime    @default(now()) @db.Timestamptz(3)
+  updatedAt        DateTime    @updatedAt @db.Timestamptz(3)
+
+  accounts         Account[]
+  sessions         Session[]
+  movieFacts       MovieFact[]
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime @db.Timestamptz(3)
+
+  @@unique([identifier, token])
+}
+
+// Stores generated OpenAI fun facts per (userId, movie)
+// Uses @db.Timestamptz(3) and is inserted with SQL NOW() so `NOW() - "createdAt"`
+// is unaffected by session timezone settings.
+// Composite B-tree index on (userId, movie, createdAt DESC) serves exact-match
+// lookup (`WHERE "userId" = $1 AND "movie" = $2 ORDER BY "createdAt" DESC LIMIT 1`).
+model MovieFact {
+  id        String   @id @default(cuid())
+  userId    String
+  movie     String   @db.VarChar(120)
+  content   String   @db.Text
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, movie, createdAt(sort: Desc)])
+}
