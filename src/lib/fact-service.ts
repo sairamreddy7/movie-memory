@@ -225,7 +225,7 @@ export class MovieFactService {
       this.logger.warn(
         `[MovieFactService] Timed out waiting ${maxWaitMs}ms for concurrent generation lock on user=${userId}`
       );
-      return this.resolveFallbackOrThrow(userId, movie, priorCachedLookup);
+      return await this.resolveFallbackOrThrow(userId, movie, priorCachedLookup);
     }
 
     try {
@@ -262,7 +262,7 @@ export class MovieFactService {
 
       // 8. Variant A Failure Handling:
       // Return the most recent cached fact if one exists; otherwise throw a user-friendly 503 error.
-      return this.resolveFallbackOrThrow(userId, movie, priorCachedLookup);
+      return await this.resolveFallbackOrThrow(userId, movie, priorCachedLookup);
     } finally {
       // Compare-and-clear: only releases the lock if `factLockId === lockToken`
       await this.repo.releaseGenerationLock(userId, lockToken).catch((releaseErr) => {
