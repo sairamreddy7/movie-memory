@@ -103,7 +103,8 @@ The schema lives in `prisma/schema.prisma` and the initial SQL migration is comm
        ```
      * In `finally`, `releaseGenerationLock` executes a compare-and-clear (`WHERE "id" = $userId AND "factLockId" = $lockToken`) so a delayed worker can never clear a lock acquired by a subsequent worker.
      * When `acquireGenerationLock` returns `false`, the caller polls `getLatestFact` every 150ms for up to `LOCK_MAX_WAIT_MS = 10_000 ms` (exceeding OpenAI's 8s ceiling). If the wait times out, execution **never** falls through to call OpenAI without the lock—it returns the stale cached fact or throws `FactGenerationError` (`503`).
-3. **Failure Handling & Logging:**
+3. **Failure Handling, Prompt Injection Defense & Logging:**
+   * External LLM inputs are bounded by XML tags (`<movie_title>${movie}</movie_title>`) and guarded against prompt injection by instructing the system prompt to treat the delimited content strictly as untrusted data.
    * Any OpenAI or persistence error is logged server-side via `FactLogger.error`. If a prior fact exists for `(userId, movie)` (regardless of age), it is returned with `source: "stale_fallback"`; otherwise a sanitized `FactGenerationError` (`503`) is returned to the client.
 
 ## 5. Variant Choice & Rationale (Variant A)
