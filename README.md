@@ -8,9 +8,21 @@ This submission implements the **Base Implementation** plus **Variant A — Back
 
 ### Prerequisites
 * **Node.js** `>= 18.18.0` (or `v20+`)
-* **PostgreSQL** `>= 14`
+* **PostgreSQL** `>= 14` (local install or Docker container)
 * **Google Cloud OAuth 2.0 Credentials** (Authorized redirect URI: `http://localhost:3000/api/auth/callback/google`)
 * **OpenAI API Key**
+
+### Starting Postgres with Docker (Optional)
+If you do not have a local Postgres database configured—or if port `5432` is already occupied by another local Postgres instance—you can start a container mapped to host port `5433`:
+```bash
+docker run --name movie-memory-db \
+  -e POSTGRES_USER=postgres \
+  -e POSTGRES_PASSWORD=postgres \
+  -e POSTGRES_DB=movie_memory \
+  -p 5433:5432 \
+  -d postgres:16
+```
+*(If using port `5433`, set `DATABASE_URL="postgresql://postgres:postgres@localhost:5433/movie_memory?schema=public"` in `.env`.)*
 
 ### Local Setup
 
@@ -82,7 +94,7 @@ The schema lives in `prisma/schema.prisma` and the initial SQL migration is comm
 ### Request Flow & Non-Blocking Dashboard
 
 1. **Authentication (`/`):** Unauthenticated visitors see the landing page with `"Sign in with Google"`. Post-login, `/` checks `user.favoriteMovie` in Postgres and redirects first-time users to `/onboarding` and returning users to `/dashboard`.
-2. **Onboarding (`/onboarding` & `POST /api/onboarding`):** `validateMovieTitle()` trims whitespace, collapses consecutive spaces, rejects ASCII control characters, and enforces 1–120 characters. Updates are scoped strictly to `session.user.id`.
+2. **Onboarding (`/onboarding` & `POST /api/onboarding`):** `validateMovieTitle()` trims whitespace, collapses consecutive spaces, rejects ASCII control characters and angle brackets (`<`, `>`), and enforces 1–120 characters. Updates are scoped strictly to `session.user.id`.
 3. **Dashboard (`/dashboard` & `GET /api/fact`):** `/dashboard` renders the user's Google profile (with graceful fallbacks for missing name or photo) and favorite movie immediately during SSR without waiting on OpenAI. `DashboardClient` fetches `GET /api/fact` asynchronously on mount with an `AbortController` and skeleton state, preventing slow OpenAI responses or outages from hanging page navigation.
 4. **Testable Route Handler Factories (`src/lib/fact-handler.ts`, `src/lib/onboarding-handler.ts`):** Route handler logic is extracted into pure factories in `src/lib/` free of `server-only` or Prisma imports, while `app/api/*/route.ts` files export only Next.js HTTP method handlers (`GET`, `POST`) and route config (`dynamic`).
 
@@ -103,9 +115,15 @@ The schema lives in `prisma/schema.prisma` and the initial SQL migration is comm
        ```
      * In `finally`, `releaseGenerationLock` executes a compare-and-clear (`WHERE "id" = $userId AND "factLockId" = $lockToken`) so a delayed worker can never clear a lock acquired by a subsequent worker.
      * When `acquireGenerationLock` returns `false`, the caller polls `getLatestFact` every 150ms for up to `LOCK_MAX_WAIT_MS = 10_000 ms` (exceeding OpenAI's 8s ceiling). If the wait times out, execution **never** falls through to call OpenAI without the lock—it returns the stale cached fact or throws `FactGenerationError` (`503`).
-3. **Failure Handling, Prompt Injection Defense & Logging:**
-   * External LLM inputs are bounded by XML tags (`<movie_title>${movie}</movie_title>`) and guarded against prompt injection by instructing the system prompt to treat the delimited content strictly as untrusted data.
+3. **Failure Handling, Prompt Injection Mitigation & Logging:**
+   * External LLM inputs are wrapped in `<movie_title>${movie}</movie_title>` delimiters (with `<` and `>` rejected by `validateMovieTitle()` so a stored title cannot close the tag), and the system prompt instructs the model to treat the delimited content strictly as untrusted data—mitigating prompt injection.
    * Any OpenAI or persistence error is logged server-side via `FactLogger.error`. If a prior fact exists for `(userId, movie)` (regardless of age), it is returned with `source: "stale_fallback"`; otherwise a sanitized `FactGenerationError` (`503`) is returned to the client.
+
+### Testing (`src/__tests__/fact-service.test.ts`)
+
+* Run `npm test` to execute the Vitest suite (18 tests).
+* **Unit & Route Handler Tests:** The test suite injects an `InMemoryFactRepository` and `MockFactGenerator` into `MovieFactService`, `createFactGetHandler`, and `createOnboardingPostHandler` so tests run deterministically in `< 1s` without requiring a live Postgres server or OpenAI key. It covers the 60s cache window, negative `ageMs` handling, Tier 1 singleflight, Tier 2 multi-instance contention, lock timeout non-fallthrough, compare-and-clear token ownership, OpenAI failure fallback, route-level `401` and spoofed `userId` isolation, and title validation.
+* **Database Verification:** The raw SQL queries in `PrismaFactRepository` (`TIMESTAMPTZ(3)` age calculation and compare-and-clear lease updates) were verified directly against a live PostgreSQL instance during end-to-end testing.
 
 ## 5. Variant Choice & Rationale (Variant A)
 
@@ -122,6 +140,7 @@ I chose **Variant A — Backend-Focused (Caching & Correctness)** because wrappi
 | **Failure Caching** | **Fallback to stale cached fact without negative-caching errors** | Circuit breaker / negative cache TTL on OpenAI errors | Keeps implementation state minimal inside Postgres. Sequential requests during an outage will re-attempt OpenAI, which is tolerable because `/dashboard` loads facts asynchronously on the client without blocking SSR. |
 | **Cache Storage** | **Postgres `MovieFact` with exact-match B-tree index `(userId, movie, createdAt DESC)`** | Redis (`SETEX`) | Postgres is already in the stack and stores every generated fact. Exact-match indexing serves both the 60s cache check and the stale fallback without adding Redis operational overhead. |
 | **Dashboard Fact Loading** | **Client fetch on mount (`GET /api/fact`) with loading skeleton** | Blocking `/dashboard` SSR on `getFactForUser` | Blocking SSR on OpenAI causes `/dashboard` navigation to hang for up to 8s on cache misses or outages. Loading the fact via `/api/fact` renders the profile immediately. |
+| **LLM Fact Accuracy** | **Prompting `gpt-4o-mini` for well-established trivia while avoiding uncertain dates/numbers/journals** | Retrieval-augmented generation (RAG) against TMDB/Wikipedia | Direct LLM generation keeps latency and architecture simple, but ungrounded models can confabulate specific citations or numbers; constraining the prompt reduces fabricated details without adding external search APIs. |
 
 ## 7. What I Would Improve with 2 More Hours
 

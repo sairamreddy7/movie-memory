@@ -44,11 +44,19 @@ export function validateMovieTitle(input: unknown): MovieValidationResult {
     };
   }
 
-  // Disallow ASCII control characters
+  // Disallow ASCII control characters and angle brackets (< or >)
+  // so titles cannot break out of <movie_title>...</movie_title> prompt delimiters
   if (/[\u0000-\u001F\u007F]/.test(normalized)) {
     return {
       valid: false,
       error: "Movie title contains invalid control characters.",
+    };
+  }
+
+  if (/[<>]/.test(normalized)) {
+    return {
+      valid: false,
+      error: "Movie title cannot contain '<' or '>' characters.",
     };
   }
 
